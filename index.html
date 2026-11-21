@@ -1,0 +1,765 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Electronic music archive</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Spectral:ital,wght@0,400;0,600;1,400&display=swap">
+<style>
+:root{--bg:#f3eff7;--fg:#1e1828;--mut:#6b6280;--line:#cfc6dd;--btn:#1e1828;--btnfg:#f3eff7;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#15101d;--fg:#e9e3f1;--mut:#9a8fb0;--line:#3a3150;--btn:#e9e3f1;--btnfg:#15101d}}
+:root[data-theme="dark"]{--bg:#15101d;--fg:#e9e3f1;--mut:#9a8fb0;--line:#3a3150;--btn:#e9e3f1;--btnfg:#15101d}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:"Spectral",Georgia,serif;line-height:1.55}
+main{max-width:600px;margin:0 auto;padding:20px 16px 40px}
+h1{font-size:1.7rem;font-weight:600;margin:0 0 6px;letter-spacing:-.01em}
+p{margin:0 0 14px;color:var(--mut);max-width:60ch}
+.bar{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0 8px}
+button{font:inherit;font-size:.95rem;padding:7px 14px;border-radius:4px;border:1px solid var(--fg);background:transparent;color:var(--fg);cursor:pointer}
+button.on{background:var(--btn);color:var(--btnfg)}
+button:focus-visible{outline:2px solid var(--fg);outline-offset:2px}
+#stats,#info{font-size:.9rem;color:var(--mut);min-height:1.5em;margin:0 0 6px}
+#info{color:var(--fg)}
+#canvas-holder{overflow-x:auto}
+canvas{display:block;max-width:100%}
+input[type=text]{font:inherit;font-size:.95rem;padding:7px 10px;border-radius:4px;border:1px solid var(--fg);background:var(--bg);color:var(--fg);flex:1 1 220px;min-width:0}
+#target-status{font-size:.85rem;color:var(--mut);margin:0 0 10px;min-height:1.3em}
+select{font:inherit;font-size:.95rem;padding:7px 10px;border-radius:4px;border:1px solid var(--fg);background:var(--bg);color:var(--fg)}
+</style>
+</head>
+<body>
+<main>
+<h1>Electronic music archive</h1>
+<p>Evolution here keeps every kind of track it finds instead of chasing one winner. Each square holds the best track for its mix of melody and drum busyness; colour is the mode. Click a square to hear it. Pick a genre to seed the search with its tempo, chords and drum feel; changing genre starts a fresh archive. You can also type a note or chord progression to make matching it part of the fitness; existing tracks re-adapt when you change it.</p>
+<div class="bar">
+  <select id="genre" aria-label="Genre"></select>
+  <button id="btn-evolve" class="on">Evolving</button>
+  <button id="btn-stop">Stop sound</button>
+  <button id="btn-reset">Start over</button>
+</div>
+<div class="bar">
+  <input id="progression" type="text" placeholder="Target progression, e.g. A F C G" aria-label="Target progression" spellcheck="false" autocomplete="off">
+  <button id="btn-target">Set target</button>
+</div>
+<div id="target-status">Optional: type notes or chords (A F C G, or Am G F E). The progression is stretched across the four bars.</div>
+<div id="stats"></div>
+<div id="info">Nothing selected yet.</div>
+<div id="canvas-holder"></div>
+<p style="margin-top:14px;font-size:.85rem">Rows: drum hits. Columns: melody notes. Lower roll: melody (top) and kick, snare, hat (bottom).</p>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+<script>
+/* ==========================================================================
+   WITCH HOUSE ARCHIVE
+   A MAP-Elites (quality-diversity) search over 4-bar witch house tracks.
+
+   Genome layout
+   -------------
+   mode        index into SCALES (which musical mode the track uses)
+   chordRoots  4 scale degrees (0-6), one chord root per bar
+   bpm         tempo
+   melody      64 sixteenth-note steps. Each entry is:
+                 0..13   start a note on that scale degree (two octaves)
+                 HOLD    keep sounding the previous note
+                 REST    silence
+   drums       96 entries = 3 voices x 2 bars x 16 steps. Indexed as
+                 voice * 32 + (bar % 2) * 16 + stepInBar
+               voices: 0 kick, 1 snare, 2 hat.  Values: 0 off, 1 soft, 2 hard.
+   ========================================================================== */
+
+// ---------- musical constants ----------
+const SCALES = [
+  [0, 1, 3, 5, 7, 8, 10],   // Phrygian
+  [0, 2, 3, 5, 7, 8, 10],   // natural minor
+  [0, 2, 3, 5, 7, 9, 10],   // Dorian
+  [0, 1, 3, 5, 6, 8, 10],   // Locrian
+  [0, 2, 3, 5, 7, 8, 11],   // harmonic minor
+  [0, 1, 4, 5, 7, 8, 10],   // Phrygian dominant
+  [0, 2, 4, 5, 7, 9, 11],   // major (Ionian)
+  [0, 2, 4, 5, 7, 9, 10],   // Mixolydian
+];
+const MODE_NAMES = ["A Phrygian", "A minor", "A Dorian", "A Locrian", "Harmonic minor", "Phrygian dominant", "A major", "A Mixolydian"];
+const MODE_HUES  = [285, 215, 165, 345, 40, 10, 95, 60];   // cell colour per mode
+
+const TOTAL_STEPS = 64;     // 4 bars x 16 sixteenth notes
+const STEPS_PER_BAR = 16;
+const REST = -1;
+const HOLD = -2;
+
+// ---------- genres ----------
+// Each genre supplies the starting point for evolution; the search is free to drift away from it.
+//   bpm          [min, max] tempo range
+//   modes        indices into SCALES the genre favours
+//   swing        how much even steps are stretched (0 = straight)
+//   progressions chord roots per bar, as scale degrees 0-6 (0 = tonic)
+//   kicks/snares steps (0-15) the groove score wants a kick / hard snare on
+//   bell         arpeggio hits: [step in bar, chord tone (0 = root, 1 = third, ...)]
+//   bass         bass hits: [step in bar, length in steps, semitone offset from chord root]
+const GENRES = [
+  { name: "Witch house", bpm: [60, 89], modes: [0, 1, 3, 4, 5], swing: 0.18,
+    progressions: [[0, 1, 0, 6], [0, 5, 0, 1], [0, 0, 5, 6]],
+    kicks: [0], snares: [4, 12],
+    bell: [[2, 0], [5, 1], [8, 2], [11, 3], [14, 0]],
+    bass: [[0, 5, 0], [7, 2, 12], [10, 4, 7]] },
+  { name: "House", bpm: [120, 128], modes: [1, 2, 7], swing: 0.06,
+    progressions: [[0, 5, 2, 6], [0, 3, 6, 2], [0, 3, 0, 3]],
+    kicks: [0, 4, 8, 12], snares: [4, 12],
+    bell: [[2, 0], [6, 1], [10, 2], [14, 1]],
+    bass: [[0, 2, 0], [3, 1, 12], [6, 2, 0], [10, 1, 7], [12, 3, 0]] },
+  { name: "Trance", bpm: [136, 142], modes: [1, 4], swing: 0,
+    progressions: [[0, 5, 2, 6], [0, 6, 5, 6], [5, 6, 0, 0]],
+    kicks: [0, 4, 8, 12], snares: [4, 12],
+    bell: [[0, 0], [2, 1], [4, 2], [6, 1], [8, 0], [10, 1], [12, 2], [14, 1]],
+    bass: [[2, 2, 0], [6, 2, 0], [10, 2, 0], [14, 2, 0]] },
+  { name: "Techno", bpm: [128, 136], modes: [1, 0, 3], swing: 0.04,
+    progressions: [[0, 0, 0, 0], [0, 0, 5, 0], [0, 6, 0, 6]],
+    kicks: [0, 4, 8, 12], snares: [4, 12],
+    bell: [[3, 0], [11, 2]],
+    bass: [[3, 1, 0], [6, 1, 0], [10, 1, 12], [14, 1, 0]] },
+  { name: "Drum and bass", bpm: [170, 176], modes: [1, 2, 4], swing: 0,
+    progressions: [[0, 5, 2, 6], [0, 5, 3, 6], [0, 3, 6, 2]],
+    kicks: [0, 10], snares: [4, 12],
+    bell: [[0, 0], [6, 2], [10, 1]],
+    bass: [[0, 4, 0], [6, 2, 0], [10, 4, 7]] },
+  { name: "Dubstep", bpm: [138, 144], modes: [0, 1, 3], swing: 0,
+    progressions: [[0, 0, 5, 6], [0, 6, 5, 6], [0, 0, 0, 3]],
+    kicks: [0], snares: [8],
+    bell: [[4, 0], [12, 2]],
+    bass: [[0, 8, 0], [8, 4, 0], [12, 4, 10]] },
+  { name: "Synthwave", bpm: [96, 108], modes: [1, 6], swing: 0,
+    progressions: [[0, 4, 5, 3], [0, 5, 2, 6], [5, 3, 0, 4]],
+    kicks: [0, 8], snares: [4, 12],
+    bell: [[0, 0], [2, 1], [4, 2], [6, 1], [8, 0], [10, 1], [12, 2], [14, 1]],
+    bass: [[0, 2, 0], [2, 2, 0], [4, 2, 0], [6, 2, 0], [8, 2, 0], [10, 2, 0], [12, 2, 0], [14, 2, 0]] },
+  { name: "Lo-fi hip hop", bpm: [70, 88], modes: [2, 1, 6], swing: 0.25,
+    progressions: [[1, 4, 0, 0], [0, 3, 0, 3], [3, 2, 1, 0]],
+    kicks: [0, 10], snares: [4, 12],
+    bell: [[2, 2], [7, 0], [11, 3]],
+    bass: [[0, 3, 0], [6, 2, 7], [10, 4, 0]] },
+];
+let genre = GENRES[0];
+
+const genreSelect = document.getElementById("genre");
+GENRES.forEach((g, i) => genreSelect.add(new Option(g.name, i)));
+
+// ---------- archive constants ----------
+const GRID = 8;             // the archive is GRID x GRID niches
+const KICK = 0, SNARE = 1, HAT = 2;
+
+const randomInt = (n) => Math.floor(Math.random() * n);
+
+// ==========================================================================
+// GENOME: creation and mutation
+// ==========================================================================
+
+function randomMelodyStep() {
+  const r = Math.random();
+  if (r < 0.30) return REST;
+  if (r < 0.65) return HOLD;
+  return randomInt(14);
+}
+
+function randomGenome() {
+  const melody = Array.from({ length: TOTAL_STEPS }, randomMelodyStep);
+  melody[0] = randomInt(14);   // always start on a real note
+
+  // Per-voice chance that any given drum step is hit: kick, snare, hat
+  const hitChance = [0.15, 0.12, 0.5];
+  const drums = Array.from({ length: 96 }, (_, i) => {
+    const voice = Math.floor(i / 32);
+    return Math.random() < hitChance[voice] ? 1 + randomInt(2) : 0;
+  });
+
+  // Give the drums a head start toward the genre's feel (evolution can still undo it)
+  for (const bar of [0, 1]) {
+    for (const s of genre.kicks)  if (Math.random() < 0.6) drums[KICK * 32 + bar * STEPS_PER_BAR + s] = 2;
+    for (const s of genre.snares) if (Math.random() < 0.6) drums[SNARE * 32 + bar * STEPS_PER_BAR + s] = 2;
+  }
+
+  const [minBpm, maxBpm] = genre.bpm;
+  return {
+    mode: genre.modes[randomInt(genre.modes.length)],
+    chordRoots: [...genre.progressions[randomInt(genre.progressions.length)]],
+    bpm: minBpm + randomInt(maxBpm - minBpm + 1),
+    melody,
+    drums,
+  };
+}
+
+// Each mutation operator edits a genome in place.
+const mutations = {
+  // Re-roll a few random melody steps
+  pointMutateMelody(g) {
+    for (let i = 0; i < 3; i++) {
+      if (Math.random() < 0.5) g.melody[randomInt(TOTAL_STEPS)] = randomMelodyStep();
+    }
+  },
+  // Shift every note in one bar up or down by 1-2 scale degrees
+  transposeBar(g) {
+    const start = randomInt(4) * STEPS_PER_BAR;
+    const shift = [-2, -1, 1, 2][randomInt(4)];
+    for (let i = start; i < start + STEPS_PER_BAR; i++) {
+      if (g.melody[i] >= 0) g.melody[i] = Math.min(13, Math.max(0, g.melody[i] + shift));
+    }
+  },
+  // Overwrite one melody bar with a copy of another
+  copyMelodyBar(g) {
+    const dest = randomInt(4) * STEPS_PER_BAR;
+    const src = randomInt(4) * STEPS_PER_BAR;
+    g.melody.splice(dest, STEPS_PER_BAR, ...g.melody.slice(src, src + STEPS_PER_BAR));
+  },
+  // Rotate one melody bar left or right in time
+  rotateBar(g) {
+    const start = randomInt(4) * STEPS_PER_BAR;
+    const shift = [-2, -1, 1, 2][randomInt(4)];
+    const bar = g.melody.slice(start, start + STEPS_PER_BAR);
+    const rotated = bar.slice(shift).concat(bar.slice(0, shift));
+    g.melody.splice(start, STEPS_PER_BAR, ...rotated);
+  },
+  // Flip a few random drum steps (biased toward switching them off)
+  flipDrums(g) {
+    const flips = 1 + randomInt(3);
+    for (let i = 0; i < flips; i++) g.drums[randomInt(96)] = [0, 0, 1, 2][randomInt(4)];
+  },
+  // Copy one drum bar over the other for a random voice
+  copyDrumBar(g) {
+    const voice = randomInt(3);
+    const dest = randomInt(2);
+    const srcStart = voice * 32 + (1 - dest) * STEPS_PER_BAR;
+    g.drums.splice(voice * 32 + dest * STEPS_PER_BAR, STEPS_PER_BAR,
+                   ...g.drums.slice(srcStart, srcStart + STEPS_PER_BAR));
+  },
+  // Mostly stay within the genre's favoured modes, occasionally leap to any mode
+  changeMode(g) {
+    g.mode = Math.random() < 0.85 ? genre.modes[randomInt(genre.modes.length)] : randomInt(SCALES.length);
+  },
+  // Either swap in a whole genre progression or change a single bar's chord
+  changeChord(g) {
+    if (Math.random() < 0.5) g.chordRoots = [...genre.progressions[randomInt(genre.progressions.length)]];
+    else g.chordRoots[randomInt(4)] = randomInt(7);
+  },
+  nudgeTempo(g) {
+    g.bpm = Math.min(genre.bpm[1] + 6, Math.max(genre.bpm[0] - 6, g.bpm + randomInt(11) - 5));
+  },
+};
+
+// [cumulative probability, operator] - the first entry whose threshold exceeds r is used
+const mutationTable = [
+  [0.30, mutations.pointMutateMelody],
+  [0.40, mutations.transposeBar],
+  [0.50, mutations.copyMelodyBar],
+  [0.58, mutations.rotateBar],
+  [0.80, mutations.flipDrums],
+  [0.86, mutations.copyDrumBar],
+  [0.91, mutations.changeMode],
+  [0.96, mutations.changeChord],
+  [1.00, mutations.nudgeTempo],
+];
+
+function mutate(parent) {
+  const child = JSON.parse(JSON.stringify(parent));
+  const operations = 1 + randomInt(3);
+  for (let k = 0; k < operations; k++) {
+    const r = Math.random();
+    const [, operator] = mutationTable.find(([threshold]) => r < threshold);
+    operator(child);
+  }
+  return child;
+}
+
+// ==========================================================================
+// EVALUATION: quality score and niche (behaviour descriptors)
+// ==========================================================================
+
+// Expand the melody into the pitch sounding at each step and whether a note starts there.
+function expandMelody(genome) {
+  let currentPitch = REST;
+  const pitchAtStep = [];
+  const noteStartsAtStep = [];
+  for (const value of genome.melody) {
+    if (value >= 0) {
+      currentPitch = value;
+      noteStartsAtStep.push(true);
+    } else {
+      if (value === REST) currentPitch = REST;   // HOLD keeps the old pitch
+      noteStartsAtStep.push(false);
+    }
+    pitchAtStep.push(currentPitch);
+  }
+  return { pitchAtStep, noteStartsAtStep };
+}
+
+// Returns { fitness, col, row } or null if the track is unusable.
+// ---------- target progression (optional, set by the user) ----------
+let targetNotes = null;          // pitch classes in semitones above A, or null when no target is set
+const TARGET_WEIGHT = 0.35;      // share of the fitness given to matching the target
+const LETTER_SEMITONES = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+
+// Reads tokens like "A F C G", "Am-G-F-E" or "C# Eb G7". Only each token's root note is used.
+function parseProgression(text) {
+  const notes = [], names = [], unreadable = [];
+  for (const token of text.split(/[\s,;|>→-]+/).filter(Boolean).slice(0, 64)) {
+    const match = token.match(/^([A-Ga-g])([#b♯♭]?)/);
+    if (!match) { unreadable.push(token); continue; }
+    const letter = match[1].toUpperCase();
+    const accidental = match[2] === "#" || match[2] === "♯" ? 1 : match[2] ? -1 : 0;
+    notes.push((LETTER_SEMITONES[letter] + accidental + 3 + 12) % 12);   // +3 re-bases from C to A
+    names.push(letter + (accidental === 1 ? "♯" : accidental === -1 ? "♭" : ""));
+  }
+  return { notes, names, unreadable };
+}
+
+// 1 when two pitch classes are equal, fading to 0 at three semitones apart
+function closeness(a, b) {
+  const d = Math.abs(a - b) % 12;
+  return Math.max(0, 1 - Math.min(d, 12 - d) / 3);
+}
+
+// How well a genome follows the target, 0-1 (null when no target is set).
+// Half from the chord roots, half from the melody notes sounding where each target note begins.
+function targetMatch(genome, pitchAtStep) {
+  if (!targetNotes) return null;
+  const scale = SCALES[genome.mode];
+  const n = targetNotes.length;
+
+  let chordScore = 0;
+  for (let bar = 0; bar < 4; bar++) {
+    chordScore += closeness(targetNotes[Math.floor(bar * n / 4)], scale[genome.chordRoots[bar]]);
+  }
+  let melodyScore = 0;
+  for (let i = 0; i < n; i++) {
+    const pitch = pitchAtStep[Math.floor(i * TOTAL_STEPS / n)];
+    melodyScore += pitch < 0 ? 0 : closeness(targetNotes[i], scale[pitch % 7]);
+  }
+  return 0.5 * chordScore / 4 + 0.5 * melodyScore / n;
+}
+
+function evaluate(genome) {
+  const { pitchAtStep } = expandMelody(genome);
+  const noteDegrees = genome.melody.filter((v) => v >= 0);
+  const noteCount = noteDegrees.length;
+  if (noteCount < 5) return null;
+
+  // 1. Chord fit: on beats 1 and 3 of each bar, is the melody on a chord tone?
+  let chordFit = 0;
+  for (let bar = 0; bar < 4; bar++) {
+    const chordTones = [0, 2, 4, 6].map((k) => (genome.chordRoots[bar] + k) % 7);
+    for (const stepInBar of [0, 8]) {
+      const pitch = pitchAtStep[bar * STEPS_PER_BAR + stepInBar];
+      if (pitch < 0) chordFit += 0.6;                          // rest: mildly OK
+      else chordFit += chordTones.includes(pitch % 7) ? 1 : 0.2;
+    }
+  }
+  chordFit /= 8;
+
+  // 2. Loop seam: last note should be near the first so the loop joins smoothly
+  const seamDistance = Math.abs(noteDegrees[noteCount - 1] - noteDegrees[0]);
+  const seamFit = seamDistance <= 2 ? 1 : seamDistance <= 4 ? 0.6 : 0.2;
+
+  // 3. Groove: how many of the genre's expected kick and hard-snare positions are present
+  let groovePositions = 0;
+  let grooveHits = 0;
+  for (const bar of [0, 1]) {
+    for (const stepInBar of genre.kicks) {
+      groovePositions++;
+      grooveHits += genome.drums[KICK * 32 + bar * STEPS_PER_BAR + stepInBar] > 0;
+    }
+    for (const stepInBar of genre.snares) {
+      groovePositions++;
+      grooveHits += genome.drums[SNARE * 32 + bar * STEPS_PER_BAR + stepInBar] === 2;
+    }
+  }
+  const groove = grooveHits / groovePositions;
+
+  // 4. Space: penalise melodies that fill more than 45% of the steps with new notes
+  const melodyDensity = noteCount / TOTAL_STEPS;
+  const spaceFit = melodyDensity <= 0.45 ? 1 : Math.max(0, 1 - (melodyDensity - 0.45) * 4);
+
+  const base = 0.40 * chordFit + 0.15 * seamFit + 0.30 * groove + 0.15 * spaceFit;
+
+  // 5. Target progression, blended in only when the user has set one
+  const match = targetMatch(genome, pitchAtStep);
+  const fitness = match === null ? base : (1 - TARGET_WEIGHT) * base + TARGET_WEIGHT * match;
+
+  // Niche: columns = melody notes (4 per bin), rows = drum hits (6 per bin)
+  const drumHits = genome.drums.filter((v) => v > 0).length;
+  return {
+    fitness,
+    match,
+    col: Math.min(GRID - 1, Math.floor(noteCount / 4)),
+    row: Math.min(GRID - 1, Math.floor(drumHits / 6)),
+  };
+}
+
+// ==========================================================================
+// ARCHIVE (MAP-Elites)
+// ==========================================================================
+
+let archive = new Map();       // "col,row" -> { genome, fitness, col, row }
+let tracksTried = 0;
+let selected = null;           // the archive entry currently playing / shown
+
+function tryInsert(genome) {
+  const result = evaluate(genome);
+  tracksTried++;
+  if (!result) return;
+  const key = result.col + "," + result.row;
+  const incumbent = archive.get(key);
+  if (!incumbent || result.fitness > incumbent.fitness) {
+    archive.set(key, { genome, fitness: result.fitness, match: result.match, col: result.col, row: result.row });
+  }
+}
+
+// One evolutionary step: seed randomly until the archive has 10 elites, then mutate random elites.
+function evolveOnce() {
+  const elites = [...archive.values()];
+  if (elites.length < 10) tryInsert(randomGenome());
+  else tryInsert(mutate(elites[randomInt(elites.length)].genome));
+}
+
+function resetArchive() {
+  archive = new Map();
+  tracksTried = 0;
+  selected = null;
+  for (let i = 0; i < 80; i++) tryInsert(randomGenome());
+  stopSound();
+}
+
+// ==========================================================================
+// AUDIO (Web Audio, Game Boy-flavoured voices)
+// ==========================================================================
+
+let audioCtx, masterGain, noiseBuffer;
+const pulseWaves = {};          // duty cycle -> PeriodicWave
+let schedulerTimer = null;
+let nextStepIndex = 0;          // which of the 64 steps to schedule next
+let nextStepTime = 0;           // audio-clock time of that step
+let stepTimeline = [];          // [{ time, step }] used to draw the playhead
+let playheadStep = -1;
+
+const midiToHz = (midi) => 440 * 2 ** ((midi - 69) / 12);
+
+// Snap a frequency to what the Game Boy's 11-bit period register can produce.
+// clockConstant: 131072 for pulse channels, 65536 for the wave channel.
+function quantizeToDMG(freq, clockConstant) {
+  const register = Math.min(2047, Math.max(0, Math.round(2048 - clockConstant / freq)));
+  return clockConstant / (2048 - register);
+}
+
+function initAudio() {
+  if (audioCtx) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+  masterGain = audioCtx.createGain();
+  masterGain.gain.value = 0.5;
+  const lowpass = audioCtx.createBiquadFilter();
+  lowpass.frequency.value = 3800;          // muffled lo-fi top end
+  masterGain.connect(lowpass);
+  lowpass.connect(audioCtx.destination);
+
+  // One second of "sample and hold" noise (every value repeated 3 times) for a crunchier sound
+  noiseBuffer = audioCtx.createBuffer(1, audioCtx.sampleRate, audioCtx.sampleRate);
+  const samples = noiseBuffer.getChannelData(0);
+  for (let i = 0; i < samples.length; i += 3) {
+    const value = Math.random() * 2 - 1;
+    for (let j = 0; j < 3 && i + j < samples.length; j++) samples[i + j] = value;
+  }
+
+  // Pulse waves built from Fourier coefficients of a rectangle with the given duty cycle
+  for (const duty of [0.25, 0.125]) {
+    const real = new Float32Array(33);
+    const imag = new Float32Array(33);
+    for (let n = 1; n < 33; n++) {
+      real[n] = Math.sin(2 * Math.PI * n * duty) / (n * Math.PI);
+      imag[n] = (1 - Math.cos(2 * Math.PI * n * duty)) / (n * Math.PI);
+    }
+    pulseWaves[duty] = audioCtx.createPeriodicWave(real, imag);
+  }
+}
+
+// A pitched note with an exponential decay. waveform: a duty-cycle key or "sine".
+function playTone(waveform, freq, startTime, length, volume) {
+  const osc = audioCtx.createOscillator();
+  const env = audioCtx.createGain();
+  if (waveform === "sine") osc.type = "sine";
+  else osc.setPeriodicWave(pulseWaves[waveform]);
+  osc.frequency.value = freq;
+  env.gain.setValueAtTime(volume, startTime);
+  env.gain.exponentialRampToValueAtTime(0.0008, startTime + length);
+  osc.connect(env);
+  env.connect(masterGain);
+  osc.start(startTime);
+  osc.stop(startTime + length + 0.03);
+}
+
+// Filtered noise burst, used for snare and hat
+function playNoise(startTime, length, volume, highpassHz, playbackRate) {
+  const source = audioCtx.createBufferSource();
+  const filter = audioCtx.createBiquadFilter();
+  const env = audioCtx.createGain();
+  source.buffer = noiseBuffer;
+  source.loop = true;
+  source.playbackRate.value = playbackRate;
+  filter.type = "highpass";
+  filter.frequency.value = highpassHz;
+  env.gain.setValueAtTime(volume, startTime);
+  env.gain.exponentialRampToValueAtTime(0.0008, startTime + length);
+  source.connect(filter);
+  filter.connect(env);
+  env.connect(masterGain);
+  source.start(startTime);
+  source.stop(startTime + length + 0.03);
+}
+
+// Sine with a fast downward pitch sweep
+function playKick(startTime, volume) {
+  const osc = audioCtx.createOscillator();
+  const env = audioCtx.createGain();
+  osc.frequency.setValueAtTime(130, startTime);
+  osc.frequency.exponentialRampToValueAtTime(42, startTime + 0.12);
+  env.gain.setValueAtTime(volume, startTime);
+  env.gain.exponentialRampToValueAtTime(0.0008, startTime + 0.3);
+  osc.connect(env);
+  env.connect(masterGain);
+  osc.start(startTime);
+  osc.stop(startTime + 0.33);
+}
+
+// Schedule every step that falls within the next 150 ms of audio time.
+function scheduleAhead() {
+  const genome = selected.genome;
+  const stepSeconds = 60 / genome.bpm / 4;
+  const scale = SCALES[genome.mode];
+  const velocity = [0, 0.45, 1];       // drum value -> loudness multiplier
+
+  while (nextStepTime < audioCtx.currentTime + 0.15) {
+    const step = nextStepIndex % TOTAL_STEPS;
+    const bar = Math.floor(step / STEPS_PER_BAR);
+    const stepInBar = step % STEPS_PER_BAR;
+    stepTimeline.push({ time: nextStepTime, step });
+
+    // Lead melody: 25% pulse, two octaves of scale degrees starting at A3
+    const degree = genome.melody[step];
+    if (degree >= 0) {
+      const midi = 57 + 12 * Math.floor(degree / 7) + scale[degree % 7];
+      playTone(0.25, quantizeToDMG(midiToHz(midi), 131072), nextStepTime, stepSeconds * 5, 0.2);
+    }
+
+    // Bells: 12.5% pulse arpeggiating the current chord, high up
+    for (const [bellStep, chordToneIndex] of genre.bell) {
+      if (bellStep !== stepInBar) continue;
+      const bellDegree = (genome.chordRoots[bar] + 2 * chordToneIndex) % 7;
+      const midi = 81 + scale[bellDegree];
+      playTone(0.125, quantizeToDMG(midiToHz(midi), 131072), nextStepTime, stepSeconds * 2.5, 0.07);
+    }
+
+    // Bass: sine on the wave channel, rooted on the current chord
+    for (const [bassStep, lengthInSteps, semitoneOffset] of genre.bass) {
+      if (bassStep !== stepInBar) continue;
+      const rootSemitone = scale[genome.chordRoots[bar]];
+      const wrapped = rootSemitone >= 7 ? rootSemitone - 12 : rootSemitone;   // keep it low
+      const midi = 45 + wrapped + semitoneOffset;
+      playTone("sine", quantizeToDMG(midiToHz(midi), 65536), nextStepTime, stepSeconds * lengthInSteps * 0.9, 0.4);
+    }
+
+    // Drums (two-bar patterns repeat across the four bars)
+    const drumAt = (voice) => genome.drums[voice * 32 + (bar % 2) * STEPS_PER_BAR + stepInBar];
+    if (drumAt(KICK))  playKick(nextStepTime, 0.7 * velocity[drumAt(KICK)]);
+    if (drumAt(SNARE)) playNoise(nextStepTime, 0.16, 0.45 * velocity[drumAt(SNARE)], 900, 1.2);
+    if (drumAt(HAT))   playNoise(nextStepTime, 0.04, 0.2 * velocity[drumAt(HAT)], 7000, 2);
+
+    // Swing: even steps are longer, odd steps shorter
+    nextStepTime += stepSeconds * (1 + (step % 2 === 0 ? genre.swing : -genre.swing));
+    nextStepIndex++;
+  }
+}
+
+function playEntry(entry) {
+  initAudio();
+  audioCtx.resume();
+  selected = entry;
+  if (schedulerTimer) clearInterval(schedulerTimer);
+  nextStepIndex = 0;
+  nextStepTime = audioCtx.currentTime + 0.05;
+  stepTimeline = [];
+  playheadStep = -1;
+  schedulerTimer = setInterval(scheduleAhead, 25);
+}
+
+function stopSound() {
+  if (schedulerTimer) clearInterval(schedulerTimer);
+  schedulerTimer = null;
+  playheadStep = -1;
+}
+
+// ==========================================================================
+// p5 VIEW
+// ==========================================================================
+
+let canvasWidth = 520;
+let evolving = true;
+const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+function setup() {
+  const holder = document.getElementById("canvas-holder");
+  canvasWidth = Math.min(560, Math.max(240, holder.clientWidth || 520));
+  // grid + axis labels + melody roll (98) + gap + drum strip (30)
+  createCanvas(canvasWidth, canvasWidth + 22 + 98 + 6 + 30).parent("canvas-holder");
+  colorMode(HSB, 360, 100, 100);
+  textFont("Spectral");
+  resetArchive();
+}
+
+function drawGrid(cellSize, foreground, gridLine) {
+  strokeWeight(1);
+  for (let col = 0; col < GRID; col++) {
+    for (let row = 0; row < GRID; row++) {
+      const entry = archive.get(col + "," + row);
+      const x = col * cellSize;
+      const y = (GRID - 1 - row) * cellSize;      // row 0 at the bottom
+      if (entry) fill(MODE_HUES[entry.genome.mode], 55, 18 + 78 * Math.pow(entry.fitness, 2));
+      else noFill();
+      stroke(gridLine);
+      rect(x + 1, y + 1, cellSize - 2, cellSize - 2, 2);
+    }
+  }
+  if (selected) {
+    noFill();
+    stroke(foreground);
+    strokeWeight(2.5);
+    rect(selected.col * cellSize + 2, (GRID - 1 - selected.row) * cellSize + 2, cellSize - 4, cellSize - 4, 2);
+    strokeWeight(1);
+  }
+}
+
+function drawRolls() {
+  const genome = selected.genome;
+  const { pitchAtStep, noteStartsAtStep } = expandMelody(genome);
+  const top = canvasWidth + 22;
+  const stepWidth = canvasWidth / TOTAL_STEPS;
+  const hue = MODE_HUES[genome.mode];
+
+  // Melody piano roll: higher notes are higher up; held steps are drawn slightly thinner
+  for (let s = 0; s < TOTAL_STEPS; s++) {
+    if (pitchAtStep[s] < 0) continue;
+    fill(hue, 55, 90);
+    rect(s * stepWidth, top + (13 - pitchAtStep[s]) * 7, stepWidth, noteStartsAtStep[s] ? 6 : 5);
+  }
+
+  // Drum strips: kick, snare, hat (hard hits are brighter)
+  for (let voice = 0; voice < 3; voice++) {
+    for (let s = 0; s < TOTAL_STEPS; s++) {
+      const hit = genome.drums[voice * 32 + (Math.floor(s / 16) % 2) * STEPS_PER_BAR + (s % STEPS_PER_BAR)];
+      if (!hit) continue;
+      fill(hue, hit === 2 ? 30 : 20, hit === 2 ? 95 : 60);
+      rect(s * stepWidth, top + 104 + voice * 9, stepWidth, 7);
+    }
+  }
+
+  // Playhead
+  if (playheadStep >= 0) {
+    fill(0, 0, 100, 0.35);
+    rect(playheadStep * stepWidth, top, stepWidth, 126);
+  }
+}
+
+function draw() {
+  background(cssVar("--bg"));
+  const foreground = cssVar("--fg");
+  const gridLine = cssVar("--line");
+
+  if (evolving) for (let i = 0; i < 25; i++) evolveOnce();
+
+  // Advance the playhead to the latest step whose scheduled time has passed
+  if (audioCtx && schedulerTimer) {
+    while (stepTimeline.length && stepTimeline[0].time <= audioCtx.currentTime) {
+      playheadStep = stepTimeline.shift().step;
+    }
+  }
+
+  const cellSize = canvasWidth / GRID;
+  drawGrid(cellSize, foreground, gridLine);
+
+  noStroke();
+  fill(cssVar("--mut"));
+  textSize(12);
+  textAlign(LEFT);
+  text("melody notes →", 0, canvasWidth + 14);
+  textAlign(RIGHT);
+  text("drum hits ↑ (rows)", canvasWidth, canvasWidth + 14);
+  textAlign(LEFT);
+
+  if (selected) drawRolls();
+
+  if (frameCount % 8 === 0) {
+    document.getElementById("stats").textContent =
+      `${archive.size} of ${GRID * GRID} niches filled · ${tracksTried} tracks tried`;
+    document.getElementById("info").textContent = selected
+      ? `${genre.name}, ${MODE_NAMES[selected.genome.mode]}, ${selected.genome.bpm} bpm, fitness ${selected.fitness.toFixed(2)}${selected.match === null ? "" : ", target match " + Math.round(selected.match * 100) + "%"}`
+      : "Nothing selected yet.";
+  }
+}
+
+function mousePressed() {
+  if (mouseX < 0 || mouseX > canvasWidth || mouseY < 0 || mouseY > canvasWidth) return;
+  const cellSize = canvasWidth / GRID;
+  const col = Math.floor(mouseX / cellSize);
+  const row = GRID - 1 - Math.floor(mouseY / cellSize);
+  const entry = archive.get(col + "," + row);
+  if (entry) playEntry(entry);
+}
+
+// ---------- buttons ----------
+document.getElementById("btn-evolve").onclick = (event) => {
+  evolving = !evolving;
+  event.target.classList.toggle("on", evolving);
+  event.target.textContent = evolving ? "Evolving" : "Paused";
+};
+document.getElementById("btn-stop").onclick = stopSound;
+genreSelect.onchange = () => {
+  genre = GENRES[Number(genreSelect.value)];
+  resetArchive();
+};
+
+// Re-score every elite under the new objective, so the population adapts instead of restarting.
+function reevaluateArchive() {
+  const genomes = [...archive.values()].map((entry) => entry.genome);
+  const tried = tracksTried;
+  archive = new Map();
+  for (const genome of genomes) tryInsert(genome);
+  tracksTried = tried;
+  if (selected) {
+    selected = archive.get(selected.col + "," + selected.row) || null;
+    if (!selected) stopSound();
+  }
+}
+
+function applyTarget() {
+  const text = document.getElementById("progression").value;
+  const status = document.getElementById("target-status");
+  if (!text.trim()) {
+    targetNotes = null;
+    status.textContent = "No target set: fitness comes from the genre alone.";
+  } else {
+    const { notes, names, unreadable } = parseProgression(text);
+    if (notes.length === 0) {
+      status.textContent = "Couldn’t read any notes. Try something like A F C G or Am G F E.";
+      return;
+    }
+    targetNotes = notes;
+    status.textContent = "Target: " + names.join(" → ") + (unreadable.length ? ` (skipped: ${unreadable.join(", ")})` : "");
+  }
+  reevaluateArchive();
+}
+document.getElementById("btn-target").onclick = applyTarget;
+document.getElementById("progression").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") applyTarget();
+});
+document.getElementById("btn-reset").onclick = resetArchive;
+</script>
+</body>
+</html>
