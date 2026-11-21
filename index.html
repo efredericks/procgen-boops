@@ -27,6 +27,12 @@ button:focus-visible{outline:2px solid var(--fg);outline-offset:2px}
 canvas{display:block;max-width:100%}
 input[type=text]{font:inherit;font-size:.95rem;padding:7px 10px;border-radius:4px;border:1px solid var(--fg);background:var(--bg);color:var(--fg);flex:1 1 220px;min-width:0}
 #target-status{font-size:.85rem;color:var(--mut);margin:0 0 10px;min-height:1.3em}
+details{margin:0 0 10px}
+summary{cursor:pointer;font-size:.95rem}
+.group{margin:12px 0 4px;font-size:.78rem;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)}
+.row{display:grid;grid-template-columns:minmax(110px,160px) 1fr 70px;gap:8px;align-items:center;font-size:.9rem;margin:2px 0}
+.row output{text-align:right;color:var(--mut);font-variant-numeric:tabular-nums}
+input[type=range]{width:100%;accent-color:var(--fg)}
 select{font:inherit;font-size:.95rem;padding:7px 10px;border-radius:4px;border:1px solid var(--fg);background:var(--bg);color:var(--fg)}
 </style>
 </head>
@@ -45,10 +51,11 @@ select{font:inherit;font-size:.95rem;padding:7px 10px;border-radius:4px;border:1
   <button id="btn-target">Set target</button>
 </div>
 <div id="target-status">Optional: type notes or chords (A F C G, or Am G F E). The progression is stretched across the four bars.</div>
+<details id="controls"><summary>Controls: tempo, swing, volume, evolution and fitness</summary><div id="control-panel"></div></details>
 <div id="stats"></div>
 <div id="info">Nothing selected yet.</div>
 <div id="canvas-holder"></div>
-<p style="margin-top:14px;font-size:.85rem">Rows: drum hits. Columns: melody notes. Lower roll: melody (top) and kick, snare, hat (bottom).</p>
+<p style="margin-top:14px;font-size:.85rem">Rows: drum hits. Columns: melody notes. Lower roll: melody (top) and kick, snare, hat (bottom). Underneath, each bar is written out step by step: a note name where a note starts, - while it is held, and · for a rest.</p>
 </main>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
@@ -164,11 +171,15 @@ function randomMelodyStep() {
 }
 
 function randomGenome() {
-  const melody = Array.from({ length: TOTAL_STEPS }, randomMelodyStep);
+  // Seed tracks with very different melody densities so the sparse end of the grid starts populated
+  const noteChance = 0.04 + Math.random() * 0.4;
+  const melody = Array.from({ length: TOTAL_STEPS }, () =>
+    Math.random() < noteChance ? randomInt(14) : (Math.random() < 0.45 ? REST : HOLD));
   melody[0] = randomInt(14);   // always start on a real note
 
   // Per-voice chance that any given drum step is hit: kick, snare, hat
-  const hitChance = [0.15, 0.12, 0.5];
+  const drumScale = 0.1 + Math.random() * 1.9;   // vary overall drum busyness from track to track
+  const hitChance = [0.15, 0.12, 0.5].map((chance) => Math.min(0.9, chance * drumScale));
   const drums = Array.from({ length: 96 }, (_, i) => {
     const voice = Math.floor(i / 32);
     return Math.random() < hitChance[voice] ? 1 + randomInt(2) : 0;
@@ -180,7 +191,8 @@ function randomGenome() {
     for (const s of genre.snares) if (Math.random() < 0.6) drums[SNARE * 32 + bar * STEPS_PER_BAR + s] = 2;
   }
 
-  const [minBpm, maxBpm] = genre.bpm;
+  const minBpm = settings.bpmMin;
+  const maxBpm = settings.bpmMax;
   return {
     mode: genre.modes[randomInt(genre.modes.length)],
     chordRoots: [...genre.progressions[randomInt(genre.progressions.length)]],
@@ -221,6 +233,31 @@ const mutations = {
     g.melody.splice(start, STEPS_PER_BAR, ...rotated);
   },
   // Flip a few random drum steps (biased toward switching them off)
+  // Directional operators: the other edits drift toward medium density, so these push tracks
+  // toward the sparse and busy edges of the grid.
+  thinMelody(g) {
+    const starts = [];
+    g.melody.forEach((v, i) => { if (v >= 0) starts.push(i); });
+    const keep = starts[randomInt(starts.length)];          // always keep one note
+    for (const i of starts) if (i !== keep && Math.random() < 0.35) g.melody[i] = REST;
+  },
+  thickenMelody(g) {
+    const additions = 2 + randomInt(3);
+    for (let k = 0; k < additions; k++) {
+      const i = randomInt(TOTAL_STEPS);
+      if (g.melody[i] < 0) g.melody[i] = randomInt(14);
+    }
+  },
+  thinDrums(g) {
+    for (let i = 0; i < g.drums.length; i++) if (g.drums[i] > 0 && Math.random() < 0.35) g.drums[i] = 0;
+  },
+  thickenDrums(g) {
+    const additions = 3 + randomInt(5);
+    for (let k = 0; k < additions; k++) {
+      const i = randomInt(96);
+      if (g.drums[i] === 0) g.drums[i] = 1 + randomInt(2);
+    }
+  },
   flipDrums(g) {
     const flips = 1 + randomInt(3);
     for (let i = 0; i < flips; i++) g.drums[randomInt(96)] = [0, 0, 1, 2][randomInt(4)];
@@ -243,26 +280,30 @@ const mutations = {
     else g.chordRoots[randomInt(4)] = randomInt(7);
   },
   nudgeTempo(g) {
-    g.bpm = Math.min(genre.bpm[1] + 6, Math.max(genre.bpm[0] - 6, g.bpm + randomInt(11) - 5));
+    g.bpm = Math.min(settings.bpmMax + 6, Math.max(settings.bpmMin - 6, g.bpm + randomInt(11) - 5));
   },
 };
 
 // [cumulative probability, operator] - the first entry whose threshold exceeds r is used
 const mutationTable = [
-  [0.30, mutations.pointMutateMelody],
-  [0.40, mutations.transposeBar],
-  [0.50, mutations.copyMelodyBar],
-  [0.58, mutations.rotateBar],
-  [0.80, mutations.flipDrums],
-  [0.86, mutations.copyDrumBar],
-  [0.91, mutations.changeMode],
+  [0.22, mutations.pointMutateMelody],
+  [0.30, mutations.transposeBar],
+  [0.38, mutations.copyMelodyBar],
+  [0.44, mutations.rotateBar],
+  [0.52, mutations.thinMelody],
+  [0.57, mutations.thickenMelody],
+  [0.70, mutations.flipDrums],
+  [0.78, mutations.thinDrums],
+  [0.83, mutations.thickenDrums],
+  [0.88, mutations.copyDrumBar],
+  [0.92, mutations.changeMode],
   [0.96, mutations.changeChord],
   [1.00, mutations.nudgeTempo],
 ];
 
 function mutate(parent) {
   const child = JSON.parse(JSON.stringify(parent));
-  const operations = 1 + randomInt(3);
+  const operations = 1 + randomInt(settings.mutationStrength);
   for (let k = 0; k < operations; k++) {
     const r = Math.random();
     const [, operator] = mutationTable.find(([threshold]) => r < threshold);
@@ -294,9 +335,88 @@ function expandMelody(genome) {
 }
 
 // Returns { fitness, col, row } or null if the track is unusable.
+// ---------- adjustable settings and the controls panel ----------
+const settings = {
+  volume: 0.5,
+  speed: 25,                  // tracks bred per frame
+  mutationStrength: 3,        // each child gets 1 to this many edits
+  bpmMin: 60, bpmMax: 89,     // tempo range for new and mutated tracks (reset when the genre changes)
+  maxDensity: 0.45,           // melody density above which the "space" score starts to fall
+  targetWeight: 0.35,         // share of the fitness given to the target progression
+  weights: { chord: 0.40, seam: 0.15, groove: 0.30, space: 0.15 },   // relative fitness weights
+};
+const playback = { bpm: 80, swing: 0.18 };   // live values for whichever track is playing
+const sliders = {};
+const asPercent = (v) => Math.round(v * 100) + "%";
+const controlPanel = document.getElementById("control-panel");
+
+function addGroup(title) {
+  const heading = document.createElement("div");
+  heading.className = "group";
+  heading.textContent = title;
+  controlPanel.appendChild(heading);
+}
+
+// apply(value) runs while dragging; when rescore is true the archive is re-scored on release.
+function addSlider(id, label, min, max, step, value, format, apply, rescore) {
+  const row = document.createElement("label");
+  row.className = "row";
+  row.innerHTML = `<span>${label}</span><input type="range" min="${min}" max="${max}" step="${step}"><output></output>`;
+  const input = row.querySelector("input");
+  const output = row.querySelector("output");
+  const show = () => { output.textContent = format(Number(input.value)); };
+  input.value = value;
+  show();
+  input.addEventListener("input", () => { show(); apply(Number(input.value)); });
+  if (rescore) input.addEventListener("change", reevaluateArchive);
+  controlPanel.appendChild(row);
+  sliders[id] = { set(v) { input.value = v; show(); } };
+}
+
+addGroup("Playback (applies to the playing track)");
+addSlider("tempo", "Tempo", 40, 220, 1, playback.bpm, (v) => v + " bpm", (v) => { playback.bpm = v; });
+addSlider("swing", "Swing", 0, 0.4, 0.01, playback.swing, asPercent, (v) => { playback.swing = v; });
+addSlider("volume", "Volume", 0, 1, 0.05, settings.volume, asPercent, (v) => {
+  settings.volume = v;
+  if (masterGain) masterGain.gain.value = v;
+});
+
+addGroup("Evolution");
+addSlider("speed", "Speed", 0, 60, 1, settings.speed, (v) => v + " per frame", (v) => { settings.speed = v; });
+addSlider("mutation", "Mutation strength", 1, 6, 1, settings.mutationStrength, (v) => "up to " + v + " edits", (v) => { settings.mutationStrength = v; });
+addSlider("bpmMin", "Evolved tempo, min", 40, 220, 1, settings.bpmMin, (v) => v + " bpm", (v) => {
+  settings.bpmMin = v;
+  if (settings.bpmMax < v) { settings.bpmMax = v; sliders.bpmMax.set(v); }
+});
+addSlider("bpmMax", "Evolved tempo, max", 40, 220, 1, settings.bpmMax, (v) => v + " bpm", (v) => {
+  settings.bpmMax = v;
+  if (settings.bpmMin > v) { settings.bpmMin = v; sliders.bpmMin.set(v); }
+});
+
+addGroup("Fitness (releasing a slider re-scores every track)");
+addSlider("target", "Target progression", 0, 1, 0.05, settings.targetWeight, asPercent, (v) => { settings.targetWeight = v; }, true);
+addSlider("density", "Melody density limit", 0.1, 0.8, 0.05, settings.maxDensity, asPercent, (v) => { settings.maxDensity = v; }, true);
+for (const [key, label] of [["chord", "Weight: chord tones"], ["seam", "Weight: loop seam"], ["groove", "Weight: groove"], ["space", "Weight: space"]]) {
+  addSlider("w-" + key, label, 0, 1, 0.05, settings.weights[key], (v) => v.toFixed(2), (v) => { settings.weights[key] = v; }, true);
+}
+
+function syncPlaybackSliders() {
+  sliders.tempo.set(playback.bpm);
+  sliders.swing.set(playback.swing);
+}
+
+// A new genre brings its own tempo range and swing
+function useGenreDefaults() {
+  settings.bpmMin = genre.bpm[0];
+  settings.bpmMax = genre.bpm[1];
+  playback.swing = genre.swing;
+  sliders.bpmMin.set(settings.bpmMin);
+  sliders.bpmMax.set(settings.bpmMax);
+  sliders.swing.set(playback.swing);
+}
+
 // ---------- target progression (optional, set by the user) ----------
 let targetNotes = null;          // pitch classes in semitones above A, or null when no target is set
-const TARGET_WEIGHT = 0.35;      // share of the fitness given to matching the target
 const LETTER_SEMITONES = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
 
 // Reads tokens like "A F C G", "Am-G-F-E" or "C# Eb G7". Only each token's root note is used.
@@ -342,7 +462,7 @@ function evaluate(genome) {
   const { pitchAtStep } = expandMelody(genome);
   const noteDegrees = genome.melody.filter((v) => v >= 0);
   const noteCount = noteDegrees.length;
-  if (noteCount < 5) return null;
+  if (noteCount < 1) return null;   // allow very sparse tracks so the leftmost column (1-3 notes) can fill
 
   // 1. Chord fit: on beats 1 and 3 of each bar, is the melody on a chord tone?
   let chordFit = 0;
@@ -375,15 +495,17 @@ function evaluate(genome) {
   }
   const groove = grooveHits / groovePositions;
 
-  // 4. Space: penalise melodies that fill more than 45% of the steps with new notes
+  // 4. Space: penalise melodies that fill more than the density limit with new notes
   const melodyDensity = noteCount / TOTAL_STEPS;
-  const spaceFit = melodyDensity <= 0.45 ? 1 : Math.max(0, 1 - (melodyDensity - 0.45) * 4);
+  const spaceFit = melodyDensity <= settings.maxDensity ? 1 : Math.max(0, 1 - (melodyDensity - settings.maxDensity) * 4);
 
-  const base = 0.40 * chordFit + 0.15 * seamFit + 0.30 * groove + 0.15 * spaceFit;
+  const w = settings.weights;
+  const weightTotal = w.chord + w.seam + w.groove + w.space || 1;
+  const base = (w.chord * chordFit + w.seam * seamFit + w.groove * groove + w.space * spaceFit) / weightTotal;
 
   // 5. Target progression, blended in only when the user has set one
   const match = targetMatch(genome, pitchAtStep);
-  const fitness = match === null ? base : (1 - TARGET_WEIGHT) * base + TARGET_WEIGHT * match;
+  const fitness = match === null ? base : (1 - settings.targetWeight) * base + settings.targetWeight * match;
 
   // Niche: columns = melody notes (4 per bin), rows = drum hits (6 per bin)
   const drumHits = genome.drums.filter((v) => v > 0).length;
@@ -455,7 +577,7 @@ function initAudio() {
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 
   masterGain = audioCtx.createGain();
-  masterGain.gain.value = 0.5;
+  masterGain.gain.value = settings.volume;
   const lowpass = audioCtx.createBiquadFilter();
   lowpass.frequency.value = 3800;          // muffled lo-fi top end
   masterGain.connect(lowpass);
@@ -532,7 +654,7 @@ function playKick(startTime, volume) {
 // Schedule every step that falls within the next 150 ms of audio time.
 function scheduleAhead() {
   const genome = selected.genome;
-  const stepSeconds = 60 / genome.bpm / 4;
+  const stepSeconds = 60 / playback.bpm / 4;
   const scale = SCALES[genome.mode];
   const velocity = [0, 0.45, 1];       // drum value -> loudness multiplier
 
@@ -573,7 +695,7 @@ function scheduleAhead() {
     if (drumAt(HAT))   playNoise(nextStepTime, 0.04, 0.2 * velocity[drumAt(HAT)], 7000, 2);
 
     // Swing: even steps are longer, odd steps shorter
-    nextStepTime += stepSeconds * (1 + (step % 2 === 0 ? genre.swing : -genre.swing));
+    nextStepTime += stepSeconds * (1 + (step % 2 === 0 ? playback.swing : -playback.swing));
     nextStepIndex++;
   }
 }
@@ -582,6 +704,9 @@ function playEntry(entry) {
   initAudio();
   audioCtx.resume();
   selected = entry;
+  playback.bpm = entry.genome.bpm;      // sliders start at the track's own tempo and the genre's swing
+  playback.swing = genre.swing;
+  syncPlaybackSliders();
   if (schedulerTimer) clearInterval(schedulerTimer);
   nextStepIndex = 0;
   nextStepTime = audioCtx.currentTime + 0.05;
@@ -607,8 +732,8 @@ const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyV
 function setup() {
   const holder = document.getElementById("canvas-holder");
   canvasWidth = Math.min(560, Math.max(240, holder.clientWidth || 520));
-  // grid + axis labels + melody roll (98) + gap + drum strip (30)
-  createCanvas(canvasWidth, canvasWidth + 22 + 98 + 6 + 30).parent("canvas-holder");
+  // grid + axis labels + melody roll (98) + gap + drum strip (30) + note grid (128)
+  createCanvas(canvasWidth, canvasWidth + 22 + 98 + 6 + 30 + 128).parent("canvas-holder");
   colorMode(HSB, 360, 100, 100);
   textFont("Spectral");
   resetArchive();
@@ -636,6 +761,14 @@ function drawGrid(cellSize, foreground, gridLine) {
   }
 }
 
+const NOTE_NAMES = ["A", "A#", "B", "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#"];   // semitones above A
+
+// Name (with octave) of a melody scale degree, matching the pitch the audio plays (degree 0 = A3 in the mode's root)
+function noteNameForDegree(genome, degree) {
+  const midi = 57 + 12 * Math.floor(degree / 7) + SCALES[genome.mode][degree % 7];
+  return NOTE_NAMES[(midi - 57) % 12] + (Math.floor(midi / 12) - 1);
+}
+
 function drawRolls() {
   const genome = selected.genome;
   const { pitchAtStep, noteStartsAtStep } = expandMelody(genome);
@@ -660,6 +793,35 @@ function drawRolls() {
     }
   }
 
+  // Note grid: for each bar, a header with the chord root, then one cell per step
+  // (note name where a note starts, "-" while it is held, "·" for a rest)
+  const cellWidth = canvasWidth / STEPS_PER_BAR;
+  noStroke();
+  for (let bar = 0; bar < 4; bar++) {
+    const rowY = top + 150 + bar * 30;
+    const chordRoot = NOTE_NAMES[SCALES[genome.mode][genome.chordRoots[bar]]];
+    const isPlayingBar = playheadStep >= 0 && Math.floor(playheadStep / STEPS_PER_BAR) === bar;
+    textSize(11);
+    textStyle(isPlayingBar ? BOLD : NORMAL);
+    fill(cssVar("--fg"));
+    text(`Bar ${bar + 1}   chord root ${chordRoot}`, 0, rowY);
+    textStyle(NORMAL);
+    textSize(Math.min(11, cellWidth / 1.9));      // shrink on narrow screens so names fit their cell
+    for (let i = 0; i < STEPS_PER_BAR; i++) {
+      const step = bar * STEPS_PER_BAR + i;
+      const value = genome.melody[step];
+      if (step === playheadStep) {
+        fill(hue, 40, 90, 0.35);
+        rect(i * cellWidth, rowY + 2, cellWidth, 14, 2);
+      }
+      const label = value >= 0 ? noteNameForDegree(genome, value)
+                  : value === HOLD && pitchAtStep[step] >= 0 ? "-" : "·";
+      fill(cssVar(value >= 0 ? "--fg" : "--mut"));
+      text(label, i * cellWidth + 2, rowY + 13);
+    }
+  }
+  textSize(11);
+
   // Playhead
   if (playheadStep >= 0) {
     fill(0, 0, 100, 0.35);
@@ -672,7 +834,7 @@ function draw() {
   const foreground = cssVar("--fg");
   const gridLine = cssVar("--line");
 
-  if (evolving) for (let i = 0; i < 25; i++) evolveOnce();
+  if (evolving) for (let i = 0; i < settings.speed; i++) evolveOnce();
 
   // Advance the playhead to the latest step whose scheduled time has passed
   if (audioCtx && schedulerTimer) {
@@ -722,6 +884,7 @@ document.getElementById("btn-evolve").onclick = (event) => {
 document.getElementById("btn-stop").onclick = stopSound;
 genreSelect.onchange = () => {
   genre = GENRES[Number(genreSelect.value)];
+  useGenreDefaults();
   resetArchive();
 };
 
@@ -756,6 +919,7 @@ function applyTarget() {
   reevaluateArchive();
 }
 document.getElementById("btn-target").onclick = applyTarget;
+useGenreDefaults();
 document.getElementById("progression").addEventListener("keydown", (event) => {
   if (event.key === "Enter") applyTarget();
 });
