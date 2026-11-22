@@ -43,6 +43,7 @@ select{font:inherit;font-size:.95rem;padding:7px 10px;border-radius:4px;border:1
 <div class="bar">
   <select id="genre" aria-label="Genre"></select>
   <button id="btn-evolve" class="on">Evolving</button>
+  <button id="btn-view">Colour by: mode</button>
   <button id="btn-stop">Stop sound</button>
   <button id="btn-reset">Start over</button>
 </div>
@@ -55,7 +56,7 @@ select{font:inherit;font-size:.95rem;padding:7px 10px;border-radius:4px;border:1
 <div id="stats"></div>
 <div id="info">Nothing selected yet.</div>
 <div id="canvas-holder"></div>
-<p style="margin-top:14px;font-size:.85rem">Rows: drum hits. Columns: melody notes. Lower roll: melody (top) and kick, snare, hat (bottom). Underneath, each bar is written out step by step: a note name where a note starts, - while it is held, and · for a rest.</p>
+<p style="margin-top:14px;font-size:.85rem">Rows: drum hits. Columns: melody notes. Lower roll: melody (top) and kick, snare, hat (bottom). Underneath, each bar is written out step by step: a note name where a note starts, - while it is held, and · for a rest. The "Colour by" button switches the grid between mode colours and a fitness heatmap: dark purple is the lowest fitness in the archive, bright yellow the highest, and each square shows its fitness × 100.</p>
 </main>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
@@ -739,17 +740,37 @@ function setup() {
   resetArchive();
 }
 
+let colourByFitness = false;   // toggled by the colour button
+
 function drawGrid(cellSize, foreground, gridLine) {
   strokeWeight(1);
+  // Heatmap scale: stretch the colours between the lowest and highest fitness currently in the archive
+  let lowest = 1;
+  let highest = 0;
+  for (const e of archive.values()) {
+    lowest = Math.min(lowest, e.fitness);
+    highest = Math.max(highest, e.fitness);
+  }
   for (let col = 0; col < GRID; col++) {
     for (let row = 0; row < GRID; row++) {
       const entry = archive.get(col + "," + row);
       const x = col * cellSize;
       const y = (GRID - 1 - row) * cellSize;      // row 0 at the bottom
-      if (entry) fill(MODE_HUES[entry.genome.mode], 55, 18 + 78 * Math.pow(entry.fitness, 2));
+      let heat = 0;   // 0 = lowest fitness in the archive, 1 = highest
+      if (entry) heat = highest > lowest ? (entry.fitness - lowest) / (highest - lowest) : 1;
+      if (entry && colourByFitness) fill(260 - 210 * heat, 70, 30 + 70 * heat);   // purple to yellow
+      else if (entry) fill(MODE_HUES[entry.genome.mode], 55, 18 + 78 * Math.pow(entry.fitness, 2));
       else noFill();
       stroke(gridLine);
       rect(x + 1, y + 1, cellSize - 2, cellSize - 2, 2);
+      if (entry && colourByFitness) {
+        const size = Math.min(14, cellSize / 3.5);
+        noStroke();
+        fill(0, 0, heat > 0.55 ? 10 : 100);        // dark text on bright cells, light on dark
+        textSize(size);
+        textAlign(CENTER);
+        text(Math.round(entry.fitness * 100), x + cellSize / 2, y + cellSize / 2 + size * 0.35);
+      }
     }
   }
   if (selected) {
@@ -858,8 +879,12 @@ function draw() {
   if (selected) drawRolls();
 
   if (frameCount % 8 === 0) {
+    const fits = [...archive.values()].map((e) => e.fitness);
+    const fitnessSummary = fits.length
+      ? ` · fitness ${Math.min(...fits).toFixed(2)} to ${Math.max(...fits).toFixed(2)}, mean ${(fits.reduce((a, b) => a + b, 0) / fits.length).toFixed(2)}`
+      : "";
     document.getElementById("stats").textContent =
-      `${archive.size} of ${GRID * GRID} niches filled · ${tracksTried} tracks tried`;
+      `${archive.size} of ${GRID * GRID} niches filled · ${tracksTried} tracks tried${fitnessSummary}`;
     document.getElementById("info").textContent = selected
       ? `${genre.name}, ${MODE_NAMES[selected.genome.mode]}, ${selected.genome.bpm} bpm, fitness ${selected.fitness.toFixed(2)}${selected.match === null ? "" : ", target match " + Math.round(selected.match * 100) + "%"}`
       : "Nothing selected yet.";
@@ -882,6 +907,10 @@ document.getElementById("btn-evolve").onclick = (event) => {
   event.target.textContent = evolving ? "Evolving" : "Paused";
 };
 document.getElementById("btn-stop").onclick = stopSound;
+document.getElementById("btn-view").onclick = (event) => {
+  colourByFitness = !colourByFitness;
+  event.target.textContent = colourByFitness ? "Colour by: fitness" : "Colour by: mode";
+};
 genreSelect.onchange = () => {
   genre = GENRES[Number(genreSelect.value)];
   useGenreDefaults();
